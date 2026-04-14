@@ -122,12 +122,13 @@ if not kev_df.empty:
     # Infrastructure Stack Filtering
     if tech_stack:
         pattern = '|'.join(tech_stack)
-        # Case insensitive search in Description, vendorProject, or productName
-        filtered_df = merged[
-            merged['Description'].str.contains(pattern, case=False, na=False) | 
-            merged['vendorProject'].str.contains(pattern, case=False, na=False) |
-            merged['productName'].str.contains(pattern, case=False, na=False)
-        ]
+        # Case insensitive search in Description, vendorProject, or product
+        mask = merged['Description'].str.contains(pattern, case=False, na=False)
+        if 'vendorProject' in merged.columns:
+            mask = mask | merged['vendorProject'].str.contains(pattern, case=False, na=False)
+        if 'product' in merged.columns:
+            mask = mask | merged['product'].str.contains(pattern, case=False, na=False)
+        filtered_df = merged[mask]
     else:
         filtered_df = merged
 
@@ -232,7 +233,7 @@ if not kev_df.empty:
         with tabs[0]:
             st.info(f"**Executive Summary (Mock LLM Output):**\n\n"
                     f"The vulnerability **{selected_cve['CVE-ID']}** affects **{selected_cve.get('vendorProject', 'Unknown Vendor')}** "
-                    f"(**{selected_cve.get('productName', 'Unknown Product')}**). "
+                    f"(**{selected_cve.get('product', 'Unknown Product')}**). "
                     f"With a CVSS Severity of **{selected_cve['Severity']}** and an EPSS score of **{selected_cve['EPSS Score']:.3f}**, "
                     f"it is {'highly' if selected_cve['EPSS Score'] > 0.5 else 'moderately'} likely to be exploited. "
                     f"CISA has confirmed this is exploited in the wild. "
