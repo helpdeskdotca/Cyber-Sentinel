@@ -207,26 +207,47 @@ if not kev_df.empty:
     # --- DETAILED INTELLIGENCE FEED & LLM SUMMARIES ---
     st.markdown("### 📰 Detailed Intelligence Feed")
     
-    display_cols = ["CVE-ID", "Severity", "EPSS Score", "In-the-Wild", "PoC Found", "Date Added"]
+    # Create the Technology column
+    if 'vendorProject' in filtered_df.columns and 'product' in filtered_df.columns:
+        filtered_df['Technology'] = filtered_df['vendorProject'].astype(str) + " / " + filtered_df['product'].astype(str)
+        filtered_df['Technology'] = filtered_df['Technology'].str.replace("nan / nan", "Unknown").str.replace("nan / ", "").str.replace(" / nan", "")
+    else:
+        filtered_df['Technology'] = "Unknown"
+        
+    filtered_df['NVD Link'] = "https://nvd.nist.gov/vuln/detail/" + filtered_df['CVE-ID']
+        
+    tech_feed_filter = st.text_input("🔍 Search within Detailed Feed by Technology (e.g., Microsoft, IOS)")
+    
+    feed_df = filtered_df
+    if tech_feed_filter:
+        feed_df = feed_df[feed_df['Technology'].str.contains(tech_feed_filter, case=False, na=False)]
+    
+    display_cols = ["CVE-ID", "Technology", "Severity", "EPSS Score", "In-the-Wild", "PoC Found", "NVD Link", "Date Added"]
     
     st.markdown("Select a row below to generate an AI Intelligence Briefing.")
     
     # st.dataframe with selections natively (Streamlit 1.35+)
     event = st.dataframe(
-        filtered_df[display_cols].style.format({"EPSS Score": "{:.3f}", "Severity": "{:.1f}"}),
+        feed_df[display_cols],
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
-        selection_mode="single-row"
+        selection_mode="single-row",
+        column_config={
+            "EPSS Score": st.column_config.NumberColumn(format="%.3f"),
+            "Severity": st.column_config.NumberColumn(format="%.1f"),
+            "NVD Link": st.column_config.LinkColumn("NIST NVD", display_text="View on NVD")
+        }
     )
 
     selected_rows = event.selection.rows if hasattr(event, 'selection') else []
 
     if selected_rows:
         selected_idx = selected_rows[0]
-        selected_cve = filtered_df.iloc[selected_idx]
+        selected_cve = feed_df.iloc[selected_idx]
         
         st.markdown(f"## 🤖 AI Threat Briefing: `{selected_cve['CVE-ID']}`")
+        st.markdown(f"[🔗 View full Vulnerability details on NIST NVD](https://nvd.nist.gov/vuln/detail/{selected_cve['CVE-ID']})")
         
         tabs = st.tabs(["Executive Summary", "Technical Root Cause"])
         
