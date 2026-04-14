@@ -204,7 +204,53 @@ if not kev_df.empty:
         
     st.divider()
 
-    # --- DETAILED INTELLIGENCE FEED & LLM SUMMARIES ---
+    # --- ADVANCED ANALYTICS ---
+    st.markdown("### 📈 Advanced Analytics")
+    colA, colB = st.columns(2)
+    
+    with colA:
+        # Exploit Discovery Timeline
+        st.markdown("**Exploit Discovery Timeline**")
+        timeline_df = filtered_df.copy()
+        if not timeline_df.empty and 'Date Added' in timeline_df.columns:
+            timeline_df['Month-Year'] = timeline_df['Date Added'].dt.to_period('M').astype(str)
+            timeline_grouped = timeline_df.groupby('Month-Year').size().reset_index(name='Count')
+            timeline_grouped = timeline_grouped.sort_values('Month-Year')
+            
+            fig_time = px.bar(
+                timeline_grouped, 
+                x='Month-Year', y='Count', 
+                title="Vulnerabilities Added per Month",
+                color_discrete_sequence=['#1f77b4']
+            )
+            fig_time.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="white")
+            st.plotly_chart(fig_time, use_container_width=True)
+        else:
+            st.info("Date data not available.")
+
+    with colB:
+        # Top Targeted Vendors
+        st.markdown("**Top Targeted Vendors**")
+        if not filtered_df.empty and 'vendorProject' in filtered_df.columns:
+            vendor_counts = filtered_df['vendorProject'].value_counts().head(10).reset_index()
+            vendor_counts.columns = ['Vendor', 'Count']
+            
+            fig_vendor = px.pie(
+                vendor_counts,
+                names='Vendor',
+                values='Count',
+                title="Top 10 Vulnerable Vendors",
+                hole=0.4
+            )
+            fig_vendor.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="white")
+            fig_vendor.update_traces(textposition='inside', textinfo='percent+label', showlegend=False)
+            st.plotly_chart(fig_vendor, use_container_width=True)
+        else:
+            st.info("Vendor data not available.")
+
+    st.divider()
+
+    # --- DETAILED INTELLIGENCE FEED & CSV EXPORT ---
     st.markdown("### 📰 Detailed Intelligence Feed")
     
     # Create the Technology column
@@ -224,15 +270,11 @@ if not kev_df.empty:
     
     display_cols = ["CVE-ID", "Technology", "Severity", "EPSS Score", "In-the-Wild", "PoC Found", "NVD Link", "Date Added"]
     
-    st.markdown("Select a row below to generate an AI Intelligence Briefing.")
-    
-    # st.dataframe with selections natively (Streamlit 1.35+)
-    event = st.dataframe(
+    # st.dataframe without selections to prevent flickering
+    st.dataframe(
         feed_df[display_cols],
         use_container_width=True,
         hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
         column_config={
             "EPSS Score": st.column_config.NumberColumn(format="%.3f"),
             "Severity": st.column_config.NumberColumn(format="%.1f"),
@@ -240,33 +282,15 @@ if not kev_df.empty:
         }
     )
 
-    selected_rows = event.selection.rows if hasattr(event, 'selection') else []
-
-    if selected_rows:
-        selected_idx = selected_rows[0]
-        selected_cve = feed_df.iloc[selected_idx]
-        
-        st.markdown(f"## 🤖 AI Threat Briefing: `{selected_cve['CVE-ID']}`")
-        st.markdown(f"[🔗 View full Vulnerability details on NIST NVD](https://nvd.nist.gov/vuln/detail/{selected_cve['CVE-ID']})")
-        
-        tabs = st.tabs(["Executive Summary", "Technical Root Cause"])
-        
-        with tabs[0]:
-            st.info(f"**Executive Summary (Mock LLM Output):**\n\n"
-                    f"The vulnerability **{selected_cve['CVE-ID']}** affects **{selected_cve.get('vendorProject', 'Unknown Vendor')}** "
-                    f"(**{selected_cve.get('product', 'Unknown Product')}**). "
-                    f"With a CVSS Severity of **{selected_cve['Severity']}** and an EPSS score of **{selected_cve['EPSS Score']:.3f}**, "
-                    f"it is {'highly' if selected_cve['EPSS Score'] > 0.5 else 'moderately'} likely to be exploited. "
-                    f"CISA has confirmed this is exploited in the wild. "
-                    f"{'A Proof-of-Concept (PoC) exploit is publicly available on GitHub.' if selected_cve['PoC Found'] else 'No public PoC exploit was found.'} "
-                    f"Immediate remediation is recommended for affected infrastructure.")
-            
-        with tabs[1]:
-            st.warning(f"**Technical Root Cause (Mock LLM Output):**\n\n"
-                       f"**Description:** {selected_cve['Description']}\n\n"
-                       f"This vulnerability typically involves improper validation of user-supplied input, "
-                       f"allowing an attacker to execute arbitrary code or bypass authentication. "
-                       f"Administrators should apply patches provided by the vendor immediately or implement compensatory controls "
-                       f"such as WAF rules blocking known malicious signatures.")
+    st.markdown("### 📤 Export Intelligence")
+    st.markdown("Download the current table data (respecting all filters) as a CSV file to share with your security engineering team.")
+    
+    csv_data = feed_df[display_cols].to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Filtered Feed (CSV)",
+        data=csv_data,
+        file_name='cyber_sentinel_threat_intel.csv',
+        mime='text/csv',
+    )
 else:
     st.info("Awaiting threat data...")
