@@ -468,7 +468,7 @@ else:
                             st.rerun()
 
 # ==========================================
-# 9. CIVIC FOOTER & OFFICIAL SERVICE BARRIE CONTACT
+# 9. CIVIC FOOTER & OFFICIAL SERVICE BARRIE CONTACT INFO
 # ==========================================
 st.divider()
 st.markdown("### 🏛️ Official City of Barrie Municipal Services")
