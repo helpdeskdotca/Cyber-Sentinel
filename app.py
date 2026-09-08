@@ -467,10 +467,31 @@ else:
                             conn.close()
                             st.rerun()
 
-# Civic Footer
+# ==========================================
+# 9. CIVIC FOOTER & OFFICIAL SERVICE BARRIE CONTACT
+# ==========================================
 st.divider()
-st.markdown("""
-**🏛️ City of Barrie Direct Services:**
-- Need urgent assistance? Submit official requests to [Service Barrie 311](https://www.barrie.ca/city-hall/service-barrie).
-- Speak with your local representative via the [Barrie Ward Councillor Directory](https://www.barrie.ca/city-hall/city-council).
-""")
+st.markdown("### 🏛️ Official City of Barrie Municipal Services")
+st.info(
+    "ℹ️ **Please Note:** The City of Barrie does **not** use a standard 311 phone number. "
+    "For official non-emergency municipal work orders, potholes, snow clearing, or general inquiries, contact **Service Barrie** directly."
+)
+
+col_contact, col_links = st.columns(2)
+
+with col_contact:
+    st.markdown("""
+    **📞 Service Barrie Contact Details:**
+    * **Phone:** [(705) 726-4242](tel:7057264242)
+    * **Email:** [service.barrie@barrie.ca](mailto:service.barrie@barrie.ca)
+    * **Hours:** Monday to Friday, 8:30 am – 4:30 pm
+    * **In-Person Desk:** First floor of City Hall, 70 Collier Street, Barrie, ON
+    """)
+
+with col_links:
+    st.markdown("""
+    **🌐 Official Online Portals:**
+    * **Online Work Orders:** [Service Barrie Portal](https://sb.barrie.ca/site/portal/home) *(Submit and track requests)*
+    * **City Directory:** [Contact Service Barrie](https://www.barrie.ca/government-news/contact-us/contact-service-barrie)
+    * **Elected Officials:** [Barrie Ward Councillor Directory](https://www.barrie.ca/city-hall/city-council)
+    """)
