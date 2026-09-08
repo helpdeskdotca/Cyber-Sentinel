@@ -1,296 +1,476 @@
 import streamlit as st
 import pandas as pd
-import requests
 import plotly.express as px
-from datetime import datetime, timedelta
+from wordcloud import WordCloud, STOPWORDS
+import matplotlib.pyplot as plt
+import sqlite3
 import random
+import smtplib
+from email.mime.text import MIMEText
 
-# --- PAGE CONFIG ---
-st.set_page_config(
-    page_title="Cyber Sentinel: Real-Time Threat Intel",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# ==========================================
+# 1. DATABASE SETUP & MIGRATIONS
+# ==========================================
+DB_FILE = "barrie_issues.db"
 
-# Custom CSS for UI touches
-st.markdown("""
-<style>
-    /* Add subtle padding and custom font styles if needed */
-    .metric-card {
-        background-color: #1e2127;
-        border-radius: 5px;
-        padding: 15px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-    }
-</style>
-""", unsafe_allow_html=True)
+# Barrie Ward Center Coordinates & Community Names
+BARRIE_WARD_INFO = {
+    "Ward 1": {"name": "Little Lake / Georgian College / Eastview North", "lat": 44.4110, "lon": -79.6640},
+    "Ward 2": {"name": "Downtown Barrie / Kempenfelt Waterfront", "lat": 44.3894, "lon": -79.6880},
+    "Ward 3": {"name": "Codrington / Eastview South", "lat": 44.4020, "lon": -79.6700},
+    "Ward 4": {"name": "Sunnidale / Letitia Heights", "lat": 44.4000, "lon": -79.7150},
+    "Ward 5": {"name": "City Centre / Anne St / Allandale North", "lat": 44.3780, "lon": -79.7020},
+    "Ward 6": {"name": "Ardagh Bluffs / West Barrie", "lat": 44.3580, "lon": -79.7280},
+    "Ward 7": {"name": "Holly / Southwest Barrie", "lat": 44.3390, "lon": -79.7120},
+    "Ward 8": {"name": "Allandale / Minet's Point", "lat": 44.3680, "lon": -79.6750},
+    "Ward 9": {"name": "Painswick / South East", "lat": 44.3480, "lon": -79.6600},
+    "Ward 10": {"name": "Innishore / Hewitt's / South Waterfront", "lat": 44.3350, "lon": -79.6380}
+}
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    nvd_api_key = st.text_input("NVD API Key (Optional)", type="password", help="Providing an API key increases NVD rate limits.")
+def get_db_connection():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db_connection()
+    c = conn.cursor()
     
-    st.header("🏗️ My Infrastructure Stack")
-    tech_stack = st.multiselect(
-        "Filter by technology:",
-        options=["Windows", "Linux", "AWS", "Kubernetes", "Cisco", "VMware", "Python", "Javascript", "Apple", "Android", "Oracle", "Microsoft", "Apache"],
-        default=["Windows", "Linux"]
-    )
-    
-# --- DATA INGESTION ---
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_cisa_kev():
-    """Fetch CISA Known Exploited Vulnerabilities"""
-    url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
-    try:
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        df = pd.DataFrame(data['vulnerabilities'])
-        # Rename columns to standard names
-        df.rename(columns={'cveID': 'CVE-ID', 'shortDescription': 'Description', 'dateAdded': 'Date Added'}, inplace=True)
-        # Sort by date added
-        df['Date Added'] = pd.to_datetime(df['Date Added'])
-        df = df.sort_values(by='Date Added', ascending=False)
-        return df
-    except Exception as e:
-        st.error(f"Failed to fetch CISA KEV data: {e}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_epss_nvd_mock(cve_list, use_real_nvd=False, api_key=""):
-    """
-    Fetch EPSS scores for a list of CVEs and pull/mock CVSS severities.
-    Due to NVD rate limits without an API key, we mock CVSS data if use_real_nvd is False or fails.
-    """
-    results = []
-    
-    # We will simulate EPSS if API fails, but let's try the FIRST API
-    epss_url = "https://api.first.org/data/v1/epss"
-    
-    epss_dict = {}
-    
-    if len(cve_list) > 0:
-        # Just fetching for top 200 to save time in dashboard demo, otherwise it's hundreds of requests
-        demo_cves = cve_list[:200] 
-        cve_param = ",".join(demo_cves)
-        try:
-            res = requests.get(f"{epss_url}?cve={cve_param}", timeout=10)
-            if res.status_code == 200:
-                data = res.json().get('data', [])
-                for item in data:
-                    epss_dict[item['cve']] = float(item['epss'])
-        except:
-            pass # Fallback to mock
-
-    for cve in cve_list:
-        # EPSS Score (0.0 to 1.0)
-        epss = epss_dict.get(cve, round(random.uniform(0.01, 0.99), 3))
-        
-        # Mock CVSS (0 to 10) - In real life, fetch from NVD based on `nvd_api_key`
-        cvss = round(random.uniform(4.0, 10.0), 1)
-        
-        results.append({
-            "CVE-ID": cve,
-            "EPSS Score": epss,
-            "Severity": cvss
-        })
-        
-    return pd.DataFrame(results)
-
-def mock_github_poc(cve_id):
-    """Simulate a GitHub search for PoC. Returns True 30% of the time."""
-    return random.random() > 0.7
-
-
-# --- MAIN APP ---
-st.title("🛡️ Cyber Sentinel: Real-Time Threat Intel")
-st.markdown("Monitor 0-days, active exploits, and prioritize vulnerabilities based on EPSS and CVSS.")
-
-with st.spinner("Aggregating Threat Intelligence..."):
-    kev_df = fetch_cisa_kev()
-
-if not kev_df.empty:
-    all_cves = kev_df['CVE-ID'].tolist()
-    # Enrich top 500 for performance
-    enriched_df = fetch_epss_nvd_mock(all_cves[:500], use_real_nvd=bool(nvd_api_key), api_key=nvd_api_key)
-    
-    # Merge datasets
-    merged = pd.merge(kev_df.head(500), enriched_df, on="CVE-ID", how="left")
-    
-    # Infrastructure Stack Filtering
-    if tech_stack:
-        pattern = '|'.join(tech_stack)
-        # Case insensitive search in Description, vendorProject, or product
-        mask = merged['Description'].str.contains(pattern, case=False, na=False)
-        if 'vendorProject' in merged.columns:
-            mask = mask | merged['vendorProject'].str.contains(pattern, case=False, na=False)
-        if 'product' in merged.columns:
-            mask = mask | merged['product'].str.contains(pattern, case=False, na=False)
-        filtered_df = merged[mask]
-    else:
-        filtered_df = merged
-
-    # Add PoC Column
-    if 'PoC Found' not in filtered_df.columns:
-        filtered_df['PoC Found'] = filtered_df['CVE-ID'].apply(mock_github_poc)
-    
-    filtered_df['In-the-Wild'] = "Yes" # By definition in CISA KEV
-    
-    # --- METRICS ---
-    st.markdown("### 📊 Global Threat Overview (Filtered)")
-    col1, col2, col3 = st.columns(3)
-    
-    # Calculate metrics
-    recent_days = datetime.now() - timedelta(days=7)
-    active_0days = len(filtered_df[filtered_df['Date Added'] >= recent_days])
-    critical_wild = len(filtered_df[filtered_df['Severity'] >= 9.0])
-    avg_epss = filtered_df['EPSS Score'].mean() if not filtered_df.empty else 0.0
-
-    col1.metric("🔥 Active 0-Days (7d)", active_0days, delta="Recent KEV Additions", delta_color="inverse")
-    col2.metric("🚨 Critical Exploits in Wild", critical_wild, help="Severity >= 9.0")
-    col3.metric("🎯 Avg. EPSS Score", f"{avg_epss:.3f}", help="Probability of exploitation in next 30 days")
-
-    st.divider()
-
-    # --- EXPLOITABILITY MATRIX ---
-    st.markdown("### 🗺️ The Exploitability Matrix")
-    st.markdown("Identify **Immediate Patching Required** vulnerabilities (High Severity + High Likelihood).")
-    
-    if not filtered_df.empty:
-        # Quadrant Colors logic
-        def determine_quadrant(row):
-            if row['Severity'] >= 7.0 and row['EPSS Score'] >= 0.5:
-                return "Immediate Patching Required"
-            elif row['Severity'] >= 7.0 and row['EPSS Score'] < 0.5:
-                return "High Severity, Lower Likelihood"
-            elif row['Severity'] < 7.0 and row['EPSS Score'] >= 0.5:
-                return "Moderate Severity, High Likelihood"
-            else:
-                return "Monitor / Low Priority"
-
-        filtered_df['Risk Quadrant'] = filtered_df.apply(determine_quadrant, axis=1)
-        
-        color_discrete_map = {
-            "Immediate Patching Required": "#ff4b4b", # Red
-            "High Severity, Lower Likelihood": "#ffa500", # Orange
-            "Moderate Severity, High Likelihood": "#ffd700", # Yellow
-            "Monitor / Low Priority": "#008000" # Green
-        }
-
-        fig = px.scatter(
-            filtered_df,
-            x="Severity",
-            y="EPSS Score",
-            color="Risk Quadrant",
-            hover_name="CVE-ID",
-            hover_data={"Description": True, "PoC Found": True},
-            color_discrete_map=color_discrete_map,
-            opacity=0.8,
-            title="CVSS Severity vs EPSS Probability"
+    # Issues Table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            details TEXT,
+            ward TEXT NOT NULL,
+            category TEXT NOT NULL,
+            severity INTEGER NOT NULL,
+            submitted_by TEXT NOT NULL,
+            status TEXT DEFAULT 'active', -- active, pending_resolution, resolved
+            resolution_reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        
-        # Add quadrant lines
-        fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
-        fig.add_vline(x=7.0, line_dash="dash", line_color="gray")
-        fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="white")
-        fig.update_xaxes(showgrid=False)
-        fig.update_yaxes(showgrid=False)
-        
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No vulnerabilities found matching your infrastructure stack.")
-        
-    st.divider()
-
-    # --- ADVANCED ANALYTICS ---
-    st.markdown("### 📈 Advanced Analytics")
-    colA, colB = st.columns(2)
+    ''')
     
-    with colA:
-        # Exploit Discovery Timeline
-        st.markdown("**Exploit Discovery Timeline**")
-        timeline_df = filtered_df.copy()
-        if not timeline_df.empty and 'Date Added' in timeline_df.columns:
-            timeline_df['Month-Year'] = timeline_df['Date Added'].dt.to_period('M').astype(str)
-            timeline_grouped = timeline_df.groupby('Month-Year').size().reset_index(name='Count')
-            timeline_grouped = timeline_grouped.sort_values('Month-Year')
-            
-            fig_time = px.bar(
-                timeline_grouped, 
-                x='Month-Year', y='Count', 
-                title="Vulnerabilities Added per Month",
-                color_discrete_sequence=['#1f77b4']
-            )
-            fig_time.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="white")
-            st.plotly_chart(fig_time, use_container_width=True)
+    # Upvotes Table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS issue_upvotes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id INTEGER NOT NULL,
+            voter_email TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(issue_id, voter_email)
+        )
+    ''')
+    
+    # Comments Table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS issue_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id INTEGER NOT NULL,
+            author_email TEXT NOT NULL,
+            comment_text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Resolution Votes Table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS resolution_votes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id INTEGER NOT NULL,
+            voter_email TEXT NOT NULL,
+            vote_type TEXT NOT NULL,
+            voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(issue_id, voter_email)
+        )
+    ''')
+    
+    # Populate initial sample data if clean DB
+    c.execute("SELECT COUNT(*) FROM issues")
+    if c.fetchone()[0] == 0:
+        sample_issues = [
+            ("Bayfield St Potholes", "Major potholes near 400 ramps damaging car rims.", "Ward 1", "Roads & Traffic", 5, "resident1@barrie.ca", "active"),
+            ("Kempenfelt Bay Beach Litter", "Overflowing bins near Centennial Park playground.", "Ward 2", "Parks & Waterfront", 3, "resident2@barrie.ca", "active"),
+            ("Route 8 Bus Transit Delays", "Connecting evening GO bus consistently late 20+ mins.", "Ward 8", "Public Transit", 4, "resident3@barrie.ca", "active"),
+            ("Mapleview Traffic Gridlock", "Signal timing at Bryne Drive causes endless backups.", "Ward 7", "Roads & Traffic", 4, "resident4@barrie.ca", "active"),
+            ("School Sidewalk Snow Drift", "Sidewalks near St. Gabriel school unplowed.", "Ward 9", "Snow & Winter", 4, "resident5@barrie.ca", "active"),
+            ("Dunlop St Lantern Fixed", "Streetlights replaced near Five Points.", "Ward 2", "Community Safety", 2, "resident6@barrie.ca", "resolved"),
+        ]
+        c.executemany('''
+            INSERT INTO issues (title, details, ward, category, severity, submitted_by, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', sample_issues)
+        
+        # Add sample upvotes
+        c.execute("INSERT OR IGNORE INTO issue_upvotes (issue_id, voter_email) VALUES (1, 'voter1@barrie.ca'), (1, 'voter2@barrie.ca'), (4, 'voter1@barrie.ca')")
+        # Add sample comment
+        c.execute("INSERT INTO issue_comments (issue_id, author_email, comment_text) VALUES (1, 'resident7@barrie.ca', 'Hit this yesterday, blew out my front passenger tire!')")
+    
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# Helper function to mask email for privacy in comments
+def mask_email(email):
+    try:
+        user, domain = email.split('@')
+        if len(user) <= 2:
+            masked_user = user[0] + "*"
         else:
-            st.info("Date data not available.")
+            masked_user = user[0] + "***" + user[-1]
+        return f"{masked_user}@{domain}"
+    except:
+        return "resident@barrie.ca"
 
-    with colB:
-        # Top Targeted Vendors
-        st.markdown("**Top Targeted Vendors**")
-        if not filtered_df.empty and 'vendorProject' in filtered_df.columns:
-            vendor_counts = filtered_df['vendorProject'].value_counts().head(10).reset_index()
-            vendor_counts.columns = ['Vendor', 'Count']
-            
-            fig_vendor = px.pie(
-                vendor_counts,
-                names='Vendor',
-                values='Count',
-                title="Top 10 Vulnerable Vendors",
-                hole=0.4
-            )
-            fig_vendor.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="white")
-            fig_vendor.update_traces(textposition='inside', textinfo='percent+label', showlegend=False)
-            st.plotly_chart(fig_vendor, use_container_width=True)
-        else:
-            st.info("Vendor data not available.")
-
-    st.divider()
-
-    # --- DETAILED INTELLIGENCE FEED & CSV EXPORT ---
-    st.markdown("### 📰 Detailed Intelligence Feed")
-    
-    # Create the Technology column
-    if 'vendorProject' in filtered_df.columns and 'product' in filtered_df.columns:
-        filtered_df['Technology'] = filtered_df['vendorProject'].astype(str) + " / " + filtered_df['product'].astype(str)
-        filtered_df['Technology'] = filtered_df['Technology'].str.replace("nan / nan", "Unknown").str.replace("nan / ", "").str.replace(" / nan", "")
+# ==========================================
+# 2. EMAIL OTP AUTHENTICATION
+# ==========================================
+def send_otp_email(to_email, code):
+    if "smtp" in st.secrets:
+        try:
+            smtp_conf = st.secrets["smtp"]
+            msg = MIMEText(f"Your Barrie Civic Issue verification code is: {code}")
+            msg['Subject'] = "Barrie Issue Tracker - Verification Code"
+            msg['From'] = smtp_conf['sender_email']
+            msg['To'] = to_email
+            with smtplib.SMTP_SSL(smtp_conf['server'], smtp_conf['port']) as server:
+                server.login(smtp_conf['username'], smtp_conf['password'])
+                server.sendmail(smtp_conf['sender_email'], [to_email], msg.as_string())
+            return True, "Code sent via email!"
+        except Exception as e:
+            return False, f"Email sending failed: {e}"
     else:
-        filtered_df['Technology'] = "Unknown"
-        
-    filtered_df['NVD Link'] = "https://nvd.nist.gov/vuln/detail/" + filtered_df['CVE-ID']
-        
-    tech_feed_filter = st.text_input("🔍 Search within Detailed Feed by Technology (e.g., Microsoft, IOS)")
-    
-    feed_df = filtered_df
-    if tech_feed_filter:
-        feed_df = feed_df[feed_df['Technology'].str.contains(tech_feed_filter, case=False, na=False)]
-    
-    display_cols = ["CVE-ID", "Technology", "Severity", "EPSS Score", "In-the-Wild", "PoC Found", "NVD Link", "Date Added"]
-    
-    # st.dataframe without selections to prevent flickering
-    st.dataframe(
-        feed_df[display_cols],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "EPSS Score": st.column_config.NumberColumn(format="%.3f"),
-            "Severity": st.column_config.NumberColumn(format="%.1f"),
-            "NVD Link": st.column_config.LinkColumn("NIST NVD", display_text="View on NVD")
-        }
-    )
+        return True, f"DEMO MODE CODE: **{code}**"
 
-    st.markdown("### 📤 Export Intelligence")
-    st.markdown("Download the current table data (respecting all filters) as a CSV file to share with your security engineering team.")
-    
-    csv_data = feed_df[display_cols].to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Download Filtered Feed (CSV)",
-        data=csv_data,
-        file_name='cyber_sentinel_threat_intel.csv',
-        mime='text/csv',
-    )
+if "auth_email" not in st.session_state:
+    st.session_state.auth_email = None
+if "pending_otp" not in st.session_state:
+    st.session_state.pending_otp = None
+if "target_email" not in st.session_state:
+    st.session_state.target_email = None
+if "selected_word" not in st.session_state:
+    st.session_state.selected_word = None
+
+# ==========================================
+# 3. SIDEBAR: AUTH & SUBMISSION
+# ==========================================
+st.set_page_config(page_title="Barrie Civic Issue Tracker", page_icon="🏙️", layout="wide")
+
+st.sidebar.title("🏙️ BarriePulse")
+
+# Auth Box
+with st.sidebar.expander("👤 Email Verification", expanded=(st.session_state.auth_email is None)):
+    if st.session_state.auth_email:
+        st.success(f"Verified: **{st.session_state.auth_email}**")
+        if st.button("Log Out"):
+            st.session_state.auth_email = None
+            st.session_state.pending_otp = None
+            st.rerun()
+    else:
+        email_input = st.text_input("Enter your email:")
+        if st.button("Get Verification Code"):
+            if "@" in email_input and "." in email_input:
+                code = str(random.randint(100000, 999999))
+                st.session_state.pending_otp = code
+                st.session_state.target_email = email_input.strip().lower()
+                ok, msg = send_otp_email(st.session_state.target_email, code)
+                if ok:
+                    st.info(msg)
+                else:
+                    st.error(msg)
+            else:
+                st.error("Enter a valid email address.")
+
+        if st.session_state.pending_otp:
+            user_code = st.text_input("Enter 6-digit Code:", max_chars=6)
+            if st.button("Verify Code"):
+                if user_code.strip() == st.session_state.pending_otp:
+                    st.session_state.auth_email = st.session_state.target_email
+                    st.session_state.pending_otp = None
+                    st.success("Verified successfully!")
+                    st.rerun()
+                else:
+                    st.error("Invalid code.")
+
+st.sidebar.divider()
+st.sidebar.subheader("📢 Report a New Issue")
+
+BARRIE_WARDS = [f"Ward {i}" for i in range(1, 11)]
+CATEGORIES = [
+    "Roads & Traffic", "Public Transit", "Parks & Waterfront", 
+    "Housing & Social Services", "Snow & Winter", "Community Safety", "Other"
+]
+
+if st.session_state.auth_email:
+    with st.sidebar.form("new_issue_form", clear_on_submit=True):
+        new_title = st.text_input("Issue Headline (1-5 words):", placeholder="e.g., Mapleview Pothole")
+        new_details = st.text_area("Details:", placeholder="Describe the issue and exact street/landmark...")
+        new_ward = st.selectbox("Ward:", BARRIE_WARDS, format_func=lambda w: f"{w} ({BARRIE_WARD_INFO[w]['name']})")
+        new_cat = st.selectbox("Category:", CATEGORIES)
+        new_sev = st.slider("Severity (1 = Minor, 5 = Critical Hazard):", 1, 5, 3)
+        
+        if st.form_submit_button("Submit Issue"):
+            if len(new_title.strip()) < 3:
+                st.error("Please provide a title.")
+            else:
+                conn = get_db_connection()
+                conn.execute('''
+                    INSERT INTO issues (title, details, ward, category, severity, submitted_by, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'active')
+                ''', (new_title.strip(), new_details.strip(), new_ward, new_cat, new_sev, st.session_state.auth_email))
+                conn.commit()
+                conn.close()
+                st.success("Issue submitted!")
+                st.rerun()
 else:
-    st.info("Awaiting threat data...")
+    st.sidebar.info("👉 Verify your email above to report issues, upvote, or comment.")
+
+# ==========================================
+# 4. MAIN PAGE: WORD CLOUD & INTERACTIVITY
+# ==========================================
+st.title("🏙️ City of Barrie Community Issue Tracker")
+st.caption("A resident-powered radar for tracking municipal issues, upvoting priorities, and confirming civic fixes.")
+
+col_view, col_sort = st.columns([2, 1])
+with col_view:
+    view_filter = st.radio("View Status:", ["Active Issues", "Civic Wins (Resolved)"], horizontal=True)
+with col_sort:
+    sort_option = st.selectbox("Sort Issues By:", ["Most Upvoted", "Highest Severity", "Newest"])
+
+# Fetch Issues with Upvote Count
+conn = get_db_connection()
+status_val = "resolved" if view_filter == "Civic Wins (Resolved)" else "active', 'pending_resolution"
+query = f'''
+    SELECT i.*, 
+           (SELECT COUNT(*) FROM issue_upvotes WHERE issue_id = i.id) as upvotes,
+           (SELECT COUNT(*) FROM issue_comments WHERE issue_id = i.id) as comment_count
+    FROM issues i
+    WHERE status IN ('{status_val}')
+'''
+df_issues = pd.read_sql_query(query, conn)
+conn.close()
+
+# Keyword filter handler
+if st.session_state.selected_word:
+    st.info(f"🔍 Filtering by keyword: **{st.session_state.selected_word}**")
+    if st.button("✖ Clear Keyword Filter"):
+        st.session_state.selected_word = None
+        st.rerun()
+    df_issues = df_issues[df_issues['title'].str.contains(st.session_state.selected_word, case=False, na=False) |
+                          df_issues['details'].str.contains(st.session_state.selected_word, case=False, na=False)]
+
+# Sorting logic
+if sort_option == "Most Upvoted":
+    df_issues = df_issues.sort_values(by="upvotes", ascending=False)
+elif sort_option == "Highest Severity":
+    df_issues = df_issues.sort_values(by="severity", ascending=False)
+else:
+    df_issues = df_issues.sort_values(by="created_at", ascending=False)
+
+# SECTION A: INTERACTIVE WORD CLOUD
+st.subheader("☁️ Issue Word Cloud")
+if not df_issues.empty:
+    all_titles = " ".join(df_issues['title'].tolist())
+    custom_stopwords = set(STOPWORDS).union({"barrie", "city", "street", "road", "ave", "avenue", "st", "problem", "issue"})
+    
+    wc = WordCloud(
+        width=1000, height=320, 
+        background_color="white", 
+        colormap="viridis" if view_filter == "Active Issues" else "summer",
+        stopwords=custom_stopwords, collocations=False
+    ).generate(all_titles)
+    
+    fig_wc, ax = plt.subplots(figsize=(10, 3.2))
+    ax.imshow(wc, interpolation="bilinear")
+    ax.axis("off")
+    st.pyplot(fig_wc)
+
+    # Clickable Word Chips to Filter Issues
+    st.write("**Click a trending keyword below to filter the dashboard:**")
+    word_freq = wc.words_
+    top_keywords = list(word_freq.keys())[:12]
+    
+    chip_cols = st.columns(len(top_keywords) if len(top_keywords) <= 6 else 6)
+    for idx, word in enumerate(top_keywords[:12]):
+        col_idx = idx % 6
+        if chip_cols[col_idx].button(f"#{word}", key=f"chip_{word}"):
+            st.session_state.selected_word = word
+            st.rerun()
+else:
+    st.info("No issues found.")
+
+# ==========================================
+# 5. BARRIE WARD & COMMUNITY MAP
+# ==========================================
+st.divider()
+st.subheader("🗺️ Barrie Ward & Community Map")
+
+# Prepare Ward Aggregates for Map
+map_rows = []
+for ward, info in BARRIE_WARD_INFO.items():
+    ward_issues = df_issues[df_issues['ward'] == ward]
+    count = len(ward_issues)
+    map_rows.append({
+        "Ward": ward,
+        "Community": info["name"],
+        "lat": info["lat"],
+        "lon": info["lon"],
+        "Issue Count": count,
+        "Marker Size": max(count * 6, 12)  # Ensure markers remain visible even if 0 count
+    })
+
+df_map = pd.DataFrame(map_rows)
+
+fig_map = px.scatter_mapbox(
+    df_map,
+    lat="lat",
+    lon="lon",
+    size="Marker Size",
+    color="Issue Count",
+    hover_name="Ward",
+    hover_data={"Community": True, "Issue Count": True, "lat": False, "lon": False, "Marker Size": False},
+    color_continuous_scale="Reds" if view_filter == "Active Issues" else "Greens",
+    zoom=11.2,
+    center={"lat": 44.378, "lon": -79.680},
+    mapbox_style="open-street-map",
+    height=450
+)
+fig_map.update_layout(margin={"r": 0, "t": 0, "l": 0, "b": 0})
+st.plotly_chart(fig_map, use_container_width=True)
+
+# Supplementary Ward & Category Charts
+col_w, col_c = st.columns(2)
+with col_w:
+    ward_counts = df_issues['ward'].value_counts().reset_index()
+    ward_counts.columns = ['Ward', 'Count']
+    st.plotly_chart(px.bar(ward_counts, x='Ward', y='Count', title="Issues by Ward", color='Count', color_continuous_scale='Blues'), use_container_width=True)
+with col_c:
+    cat_counts = df_issues['category'].value_counts().reset_index()
+    cat_counts.columns = ['Category', 'Count']
+    st.plotly_chart(px.pie(cat_counts, values='Count', names='Category', title="Issues by Category", hole=0.4), use_container_width=True)
+
+# ==========================================
+# 6. ISSUE FEED: UPVOTING, COMMENTS & RESOLUTIONS
+# ==========================================
+st.divider()
+st.subheader("📋 Community Issue Feed")
+
+if df_issues.empty:
+    st.info("No matching issues found.")
+else:
+    for _, issue in df_issues.iterrows():
+        issue_id = issue['id']
+        community_name = BARRIE_WARD_INFO.get(issue['ward'], {}).get('name', '')
+        
+        with st.container(border=True):
+            header_col, upvote_col = st.columns([5, 1])
+            
+            with header_col:
+                st.markdown(f"### {issue['title']}")
+                st.caption(f"📍 **{issue['ward']}** ({community_name}) &nbsp;|&nbsp; 🏷️ **{issue['category']}** &nbsp;|&nbsp; ⚠️ Severity: **{issue['severity']}/5**")
+                if issue['details']:
+                    st.write(issue['details'])
+            
+            with upvote_col:
+                # Check if current user already upvoted
+                has_upvoted = False
+                if st.session_state.auth_email:
+                    conn = get_db_connection()
+                    check = conn.execute("SELECT id FROM issue_upvotes WHERE issue_id = ? AND voter_email = ?", (issue_id, st.session_state.auth_email)).fetchone()
+                    conn.close()
+                    has_upvoted = check is not None
+                
+                upvote_label = f"▲ Upvoted ({issue['upvotes']})" if has_upvoted else f"▲ Upvote ({issue['upvotes']})"
+                if st.button(upvote_label, key=f"upvote_{issue_id}", disabled=(not st.session_state.auth_email or has_upvoted)):
+                    conn = get_db_connection()
+                    conn.execute("INSERT OR IGNORE INTO issue_upvotes (issue_id, voter_email) VALUES (?, ?)", (issue_id, st.session_state.auth_email))
+                    conn.commit()
+                    conn.close()
+                    st.rerun()
+
+            # Expandable Comments Section
+            with st.expander(f"💬 Comments & Updates ({issue['comment_count']})"):
+                conn = get_db_connection()
+                comments = conn.execute("SELECT * FROM issue_comments WHERE issue_id = ? ORDER BY created_at ASC", (issue_id,)).fetchall()
+                conn.close()
+                
+                if comments:
+                    for comm in comments:
+                        st.markdown(f"**{mask_email(comm['author_email'])}** *({comm['created_at'][:16]})*")
+                        st.write(comm['comment_text'])
+                        st.markdown("---")
+                else:
+                    st.caption("No comments yet. Be the first to share an update.")
+                
+                # New comment form
+                if st.session_state.auth_email:
+                    with st.form(key=f"comm_form_{issue_id}", clear_on_submit=True):
+                        c_text = st.text_input("Add a comment / update:")
+                        if st.form_submit_button("Post Comment"):
+                            if len(c_text.strip()) > 1:
+                                conn = get_db_connection()
+                                conn.execute("INSERT INTO issue_comments (issue_id, author_email, comment_text) VALUES (?, ?, ?)",
+                                             (issue_id, st.session_state.auth_email, c_text.strip()))
+                                conn.commit()
+                                conn.close()
+                                st.rerun()
+                else:
+                    st.caption("🔒 Verify your email in the sidebar to leave a comment.")
+
+            # Anti-Sabotage Resolution Workflow
+            conn = get_db_connection()
+            votes_df = pd.read_sql_query("SELECT vote_type, COUNT(*) as count FROM resolution_votes WHERE issue_id = ? GROUP BY vote_type", conn, params=(issue_id,))
+            conn.close()
+            
+            fixed_votes = votes_df[votes_df['vote_type'] == 'fixed']['count'].sum() if not votes_df.empty else 0
+            still_votes = votes_df[votes_df['vote_type'] == 'still_an_issue']['count'].sum() if not votes_df.empty else 0
+            
+            if issue['status'] == 'pending_resolution':
+                st.warning(f"🟡 **Pending Resolution**: Proposed reason: *\"{issue['resolution_reason']}\"*")
+                st.write(f"Consensus Check: **{fixed_votes} Fixed** vs **{still_votes} Still an Issue** *(Net +3 needed to resolve)*")
+                
+                if st.session_state.auth_email:
+                    b1, b2, _ = st.columns([1, 1, 3])
+                    with b1:
+                        if st.button("🟢 Fixed", key=f"fix_{issue_id}"):
+                            conn = get_db_connection()
+                            conn.execute("INSERT OR REPLACE INTO resolution_votes (issue_id, voter_email, vote_type) VALUES (?, ?, 'fixed')", (issue_id, st.session_state.auth_email))
+                            conn.commit()
+                            cur = pd.read_sql_query("SELECT vote_type FROM resolution_votes WHERE issue_id = ?", conn, params=(issue_id,))
+                            if (cur['vote_type'] == 'fixed').sum() - (cur['vote_type'] == 'still_an_issue').sum() >= 3:
+                                conn.execute("UPDATE issues SET status = 'resolved' WHERE id = ?", (issue_id,))
+                                conn.commit()
+                            conn.close()
+                            st.rerun()
+                    with b2:
+                        if st.button("🔴 Still an Issue", key=f"still_{issue_id}"):
+                            conn = get_db_connection()
+                            conn.execute("INSERT OR REPLACE INTO resolution_votes (issue_id, voter_email, vote_type) VALUES (?, ?, 'still_an_issue')", (issue_id, st.session_state.auth_email))
+                            conn.commit()
+                            cur = pd.read_sql_query("SELECT vote_type FROM resolution_votes WHERE issue_id = ?", conn, params=(issue_id,))
+                            if (cur['vote_type'] == 'still_an_issue').sum() >= (cur['vote_type'] == 'fixed').sum():
+                                conn.execute("UPDATE issues SET status = 'active', resolution_reason = NULL WHERE id = ?", (issue_id,))
+                                conn.commit()
+                            conn.close()
+                            st.rerun()
+            elif issue['status'] == 'active' and st.session_state.auth_email:
+                with st.popover("Propose as Resolved"):
+                    reason = st.text_input("How was this fixed?", key=f"res_{issue_id}", placeholder="e.g. City repaved this lane yesterday")
+                    if st.button("Submit Fix Proposal", key=f"btn_res_{issue_id}"):
+                        if len(reason.strip()) > 5:
+                            conn = get_db_connection()
+                            conn.execute("UPDATE issues SET status = 'pending_resolution', resolution_reason = ? WHERE id = ?", (reason.strip(), issue_id))
+                            conn.execute("INSERT OR REPLACE INTO resolution_votes (issue_id, voter_email, vote_type) VALUES (?, ?, 'fixed')", (issue_id, st.session_state.auth_email))
+                            conn.commit()
+                            conn.close()
+                            st.rerun()
+
+# Civic Footer
+st.divider()
+st.markdown("""
+**🏛️ City of Barrie Direct Services:**
+- Need urgent assistance? Submit official requests to [Service Barrie 311](https://www.barrie.ca/city-hall/service-barrie).
+- Speak with your local representative via the [Barrie Ward Councillor Directory](https://www.barrie.ca/city-hall/city-council).
+""")
